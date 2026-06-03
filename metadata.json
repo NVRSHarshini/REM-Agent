@@ -1,0 +1,6 @@
+{
+  "name": "REM Agent",
+  "description": "An AI customer support assistant that replays, evaluates, and mends its weaknesses based on trace history during simulated dream cycles.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
