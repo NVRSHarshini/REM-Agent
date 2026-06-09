@@ -171,7 +171,6 @@ It demonstrates how agents can move from:
 
 - Automatic prompt patching from failure patterns
 - Continuous learning loop from Phoenix datasets
-- MCP-based tool execution validation
 - Multi-agent evaluation system
 
 ---
