@@ -837,6 +837,71 @@ export function runPolicyComplianceEvaluator(
     escalation_required
   };
 }
+// ============================================================
+// ARIZE MCP INTEGRATION
+// ============================================================
+async function logTraceToArizeMCP(trace: Trace): Promise<void> {
+  const phoenixApiKey = process.env.PHOENIX_API_KEY || '';
+  if (!phoenixApiKey) return;
+
+  const phoenixEndpoint = (
+    process.env.OTEL_EXPORTER_OTLP_ENDPOINT ||
+    process.env.PHOENIX_COLLECTOR_ENDPOINT ||
+    'https://app.phoenix.arize.com'
+  ).replace(/\/$/, '') + '/v1/traces';
+
+  const toolCalls = trace.spans
+    .filter(s => s.attributes?.tool_name)
+    .map(s => ({
+      tool: String(s.attributes.tool_name),
+      input: { query: s.attributes.tool_input || '' },
+      output: { result: s.attributes.tool_output || '' },
+      latencyMs: s.endTime - s.startTime,
+    }));
+
+  const otlpPayload = {
+    resourceSpans: [{
+      resource: {
+        attributes: [
+          { key: 'service.name', value: { stringValue: 'rem-agent' } },
+          { key: 'project.name', value: { stringValue: 'rem-agent' } },
+        ]
+      },
+      scopeSpans: [{
+        scope: { name: 'arize.mcp' },
+        spans: [{
+          traceId: trace.id.replace(/-/g,'').substring(0,32).padEnd(32,'0'),
+          spanId: `mcp${trace.id.replace(/-/g,'').substring(0,13)}`.padEnd(16,'0'),
+          name: 'rem_agent.mcp_tool_trace',
+          kind: 1,
+          startTimeUnixNano: String((Date.now() - 500) * 1_000_000),
+          endTimeUnixNano: String(Date.now() * 1_000_000),
+          attributes: [
+            { key: 'mcp.tool_calls',     value: { stringValue: JSON.stringify(toolCalls) } },
+            { key: 'mcp.project',        value: { stringValue: 'rem-agent' } },
+            { key: 'input.value',        value: { stringValue: trace.request } },
+            { key: 'output.value',       value: { stringValue: trace.response } },
+            { key: 'risk_level',         value: { stringValue: trace.riskLevel } },
+            { key: 'status',             value: { stringValue: trace.status } },
+            { key: 'guardrails_active',  value: { boolValue: guardrailsApplied } },
+            { key: 'missing_tools',      value: { stringValue: (trace.missingTools||[]).join(',') } },
+          ],
+        }]
+      }]
+    }]
+  };
+
+  try {
+    await fetch(phoenixEndpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'api_key': phoenixApiKey },
+      body: JSON.stringify(otlpPayload),
+    });
+    console.log(`[Arize MCP] Logged trace ${trace.id}`);
+  } catch (err: any) {
+    console.warn('[Arize MCP] Failed:', err.message);
+  }
+}
 
 // REST Backend Service Setup
 async function startServer() {
@@ -1320,6 +1385,8 @@ async function startServer() {
       newTrace.exportStatus = 'attempted';
       exportTraceToPhoenix(newTrace, endpoint);
     }
+     // Arize MCP integration
+    logTraceToArizeMCP(newTrace).catch(() => {});
 
     res.json({ trace: newTrace, guardrailsApplied });
   });
@@ -1631,8 +1698,9 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
-    console.log(`REM Agent full-stack server listening on host 0.0.0.0 and port ${PORT}`);
+  const listenPort = Number(process.env.PORT) || PORT;
+  app.listen(listenPort, '0.0.0.0', () => {
+    console.log(`REM Agent full-stack server listening on host 0.0.0.0 and port ${listenPort}`);
   });
 }
 
