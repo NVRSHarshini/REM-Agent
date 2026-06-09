@@ -66,6 +66,10 @@ export default function App() {
   const [approvals, setApprovals] = useState<ApprovalRecord[]>([]);
   const [traces, setTraces] = useState<Trace[]>([]);
   const [guardrailsApplied, setGuardrailsApplied] = useState<boolean>(false);
+  const [guardrailState, setGuardrailState] = useState<string>('baseline');
+  const [activeGuardrails, setActiveGuardrails] = useState<any[]>([]);
+  const [applyingGuardrails, setApplyingGuardrails] = useState<boolean>(false);
+  const [successMessage, setSuccessMessage] = useState<string | null>(null);
   const [activeReport, setActiveReport] = useState<MorningReport | null>(null);
   const [dreamReplays, setDreamReplays] = useState<DreamReplay[]>([]);
   const [integration, setIntegration] = useState<IntegrationStatus | null>(null);
@@ -90,49 +94,75 @@ export default function App() {
     status: number;
     message?: string;
     error?: string;
+    finalExportUrl?: string;
+    apiKeyPresent?: boolean;
+    lastExportStatus?: string;
+    responseBody?: string;
   } | null>(null);
+
+  // Safe fetch helper to gracefully ignore non-JSON/HTML error pages or gateway 404 responses
+  const safeFetchJson = async (url: string) => {
+    try {
+      const res = await fetch(url);
+      if (!res.ok) return null;
+      const contentType = res.headers.get('content-type');
+      if (contentType && !contentType.includes('application/json')) {
+        return null;
+      }
+      const text = await res.text();
+      const trimmed = text.trim();
+      if (!trimmed || (!trimmed.startsWith('{') && !trimmed.startsWith('['))) {
+        return null;
+      }
+      return JSON.parse(trimmed);
+    } catch (err) {
+      return null;
+    }
+  };
 
   // Fetch API Initial states
   const fetchData = async () => {
     try {
       // Integration Status
-      const resInt = await fetch('/api/integration');
-      if (resInt.ok) {
-        const data = await resInt.json();
-        setIntegration(data);
+      const dataInt = await safeFetchJson('/api/integration');
+      if (dataInt) {
+        setIntegration(dataInt);
       }
 
       // Static Data references
-      const resData = await fetch('/api/data');
-      if (resData.ok) {
-        const data = await resData.json();
-        setCustomers(data.customers);
-        setBilling(data.billing);
-        setPolicies(data.policies);
-        setApprovals(data.approvals);
+      const dataStatic = await safeFetchJson('/api/data');
+      if (dataStatic) {
+        setCustomers(dataStatic.customers || []);
+        setBilling(dataStatic.billing || []);
+        setPolicies(dataStatic.policies || []);
+        setApprovals(dataStatic.approvals || []);
       }
 
       // System Configurations
-      const resConf = await fetch('/api/config');
-      if (resConf.ok) {
-        const data = await resConf.json();
-        setGuardrailsApplied(data.guardrailsApplied);
+      let currentGuardrailsApplied = false;
+      const dataConf = await safeFetchJson('/api/config');
+      if (dataConf) {
+        currentGuardrailsApplied = !!dataConf.guardrailsApplied;
+        setGuardrailsApplied(dataConf.guardrailsApplied);
+        setGuardrailState(dataConf.guardrailsApplied ? 'guardrail-enhanced' : 'baseline');
       }
 
       // Live Traces
-      const resTraces = await fetch('/api/traces');
-      if (resTraces.ok) {
-        const data = await resTraces.json();
-        setTraces(data);
+      const dataTraces = await safeFetchJson('/api/traces');
+      if (dataTraces) {
+        setTraces(dataTraces);
       }
 
       // Active Report
-      const resReport = await fetch('/api/morning-report');
-      if (resReport.ok) {
-        const data = await resReport.json();
-        if (data.report) {
-          setActiveReport(data.report);
-          setDreamReplays(data.replays);
+      const dataReport = await safeFetchJson('/api/morning-report');
+      if (dataReport && dataReport.report) {
+        const reportAppliedState = dataReport.report.applied || currentGuardrailsApplied;
+        setActiveReport({ ...dataReport.report, applied: reportAppliedState });
+        setDreamReplays(dataReport.replays || []);
+        if (reportAppliedState) {
+          setActiveGuardrails(dataReport.report.guardrails || []);
+          setGuardrailState('guardrail-enhanced');
+          setGuardrailsApplied(true);
         }
       }
     } catch (err) {
@@ -260,18 +290,53 @@ export default function App() {
 
   // Apply Guardrails from Morning Report
   const handleApplyReportGuardrails = async () => {
+    setApplyingGuardrails(true);
+    setSuccessMessage(null);
     try {
-      const res = await fetch('/api/morning-report/apply-guardrails', { method: 'POST' });
+      // Direct call to recovery-report endpoint for robustness
+      const res = await fetch('/api/recovery-report/apply-guardrails', { method: 'POST' });
       if (res.ok) {
         const data = await res.json();
         setGuardrailsApplied(true);
-        if (activeReport) {
-          setActiveReport({ ...activeReport, applied: true });
+        setGuardrailState('guardrail-enhanced');
+        
+        let reportObj = data.report || activeReport;
+        if (reportObj) {
+          setActiveReport({ ...reportObj, applied: true });
+          setActiveGuardrails(reportObj.guardrails || []);
         }
+        
+        setSuccessMessage('Guardrails applied. Live Support Mode is now using the Guardrail-Enhanced Agent.');
         fetchData();
+      } else {
+        throw new Error('Recovery report endpoint returned non-ok status');
       }
     } catch (err) {
-      console.error('Error applying report guardrails:', err);
+      console.error('Error applying report guardrails, trying fallback morning-report endpoint...', err);
+      try {
+        const resFallback = await fetch('/api/morning-report/apply-guardrails', { method: 'POST' });
+        if (resFallback.ok) {
+          const data = await resFallback.json();
+          setGuardrailsApplied(true);
+          setGuardrailState('guardrail-enhanced');
+          
+          let reportObj = data.report || activeReport;
+          if (reportObj) {
+            setActiveReport({ ...reportObj, applied: true });
+            setActiveGuardrails(reportObj.guardrails || []);
+          }
+          
+          setSuccessMessage('Guardrails applied. Live Support Mode is now using the Guardrail-Enhanced Agent.');
+          fetchData();
+        } else {
+          alert('Failed to deploy guardrail rules: Service temporarily unreachable.');
+        }
+      } catch (fallbackErr) {
+        console.error('All endpoints failed:', fallbackErr);
+        alert('All endpoints failed. Please check network and server logs.');
+      }
+    } finally {
+      setApplyingGuardrails(false);
     }
   };
 
@@ -317,7 +382,11 @@ export default function App() {
         endpoint: data.endpoint,
         status: data.status,
         message: data.message,
-        error: data.error
+        error: data.error,
+        finalExportUrl: data.finalExportUrl,
+        apiKeyPresent: data.apiKeyPresent,
+        lastExportStatus: data.lastExportStatus,
+        responseBody: data.responseBody
       });
       fetchData();
     } catch (err: any) {
@@ -1457,6 +1526,12 @@ export default function App() {
           {/* PAGE 5: RECOVERY REPORT */}
           {currentSection === 'morning' && (
             <div id="morning-section" className="space-y-8 animate-fade-in font-sans">
+              {successMessage && (
+                <div className="p-4 bg-emerald-50 border border-emerald-200 text-emerald-800 rounded-2xl flex items-center gap-3 text-sm animate-fade-in shadow-sm font-semibold">
+                  <ShieldCheck size={18} className="text-emerald-600 shrink-0" />
+                  <span>{successMessage}</span>
+                </div>
+              )}
               <div className="border-b border-[#E2E8F0] pb-6 flex items-center justify-between">
                 <div>
                   <h2 className="text-2xl font-sans font-bold text-[#0F172A]">Security & Compliance Recovery Report</h2>
@@ -1464,13 +1539,18 @@ export default function App() {
                     Prior to resuming live active-hours support queues, the REM system implements synthesized validation constraints to repair discovered compliance bypasses.
                   </p>
                 </div>
-                {activeReport && !activeReport.applied && (
+                {activeReport && (
                   <button
                     onClick={handleApplyReportGuardrails}
-                    className="px-6 py-3 bg-violet-600 hover:bg-violet-700 text-white font-bold rounded-xl shadow-md transition-all flex items-center gap-2 cursor-pointer"
+                    disabled={activeReport.applied || applyingGuardrails}
+                    className={`px-6 py-3 font-bold rounded-xl shadow-md transition-all flex items-center gap-2 ${
+                      activeReport.applied
+                        ? 'bg-emerald-50 text-emerald-700 border border-emerald-200 cursor-not-allowed shadow-none'
+                        : 'bg-violet-600 hover:bg-violet-700 text-white cursor-pointer'
+                    }`}
                   >
                     <ShieldCheck size={16} />
-                    Apply Guardrails Now
+                    {applyingGuardrails ? 'Applying Guardrails...' : activeReport.applied ? 'Guardrails Applied' : 'Apply Guardrails Now'}
                   </button>
                 )}
               </div>
@@ -1531,8 +1611,8 @@ export default function App() {
 
                       <div className="w-full text-center">
                         {activeReport.applied ? (
-                          <span className="inline-flex items-center gap-1 text-emerald-700 bg-emerald-50 border border-emerald-100 px-3 py-1 rounded-full text-xs font-semibold">
-                            ✓ Guardrail rules deployed online
+                          <span className="inline-flex items-center gap-1 text-emerald-700 bg-emerald-50 border border-emerald-100 px-3 py-1 rounded-full text-xs font-semibold animate-fade-in">
+                            ✓ Guardrail-enhanced policy active
                           </span>
                         ) : (
                           <span className="inline-flex items-center gap-1 text-amber-700 bg-amber-50 border border-amber-100 px-3 py-1 rounded-full text-xs font-semibold animate-pulse">
@@ -1749,24 +1829,103 @@ export default function App() {
                       </div>
 
                       <div className="flex justify-between pb-2.5 border-b">
-                        <span className="text-slate-400 font-medium font-sans">OTEL Endpoint Node</span>
-                        <span className="font-mono text-slate-600 truncate max-w-[150px] font-semibold">{integration?.endpoint || 'None'}</span>
+                        <span className="text-slate-400 font-medium font-sans">Final Export URL</span>
+                        <span className="font-mono text-violet-700 truncate max-w-[150px] font-bold" title={integration?.finalExportUrl}>{integration?.finalExportUrl || 'N/A'}</span>
                       </div>
 
                       <div className="flex justify-between pb-2.5 border-b">
-                        <span className="text-slate-400 font-medium">Traces Dispatched</span>
-                        <span className="font-mono font-extrabold text-[#1E293B]">{integration?.tracesAttempted || 0} API nodes</span>
+                        <span className="text-slate-400 font-medium">Export Protocol</span>
+                        <span className="font-sans text-slate-600 font-semibold">{integration?.exportProtocol || 'OTLP HTTP/protobuf'}</span>
                       </div>
 
                       <div className="flex justify-between pb-2.5 border-b">
-                        <span className="text-slate-400 font-medium font-medium">Local Fallback Buffer size</span>
-                        <span className="font-mono font-bold text-[#1E293B]">{integration?.localCount || 3} items</span>
+                        <span className="text-slate-400 font-medium">PHOENIX_API_KEY Present</span>
+                        <span className="font-mono font-bold text-slate-600">{integration?.apiKeyPresent ? 'Yes (Protected)' : 'No (Local-Only)'}</span>
                       </div>
 
                       <div className="flex justify-between pb-2.5 border-b">
-                        <span className="text-slate-400 font-medium">Last span registered index</span>
-                        <span className="font-mono text-violet-600 truncate max-w-[150px] font-bold">{integration?.lastSpanName || 'N/A'}</span>
+                        <span className="text-slate-400 font-medium">Project Header Sent</span>
+                        <span className="font-mono font-bold text-violet-700">{integration?.projectHeaderSent || 'x-project-name'}</span>
                       </div>
+
+                      <div className="flex justify-between pb-2.5 border-b">
+                        <span className="text-slate-400 font-medium">Project Name Value</span>
+                        <span className="font-mono font-bold text-[#1E293B]">{integration?.projectNameValueSent || 'REM Agent'}</span>
+                      </div>
+
+                      <div className="flex justify-between pb-2.5 border-b">
+                        <span className="text-slate-400 font-medium">Last Export Status</span>
+                        <span className={`font-mono font-bold ${integration?.lastExportStatus === 'success' ? 'text-emerald-600' : 'text-slate-500'}`}>
+                          {integration?.lastExportStatus || 'idle'}
+                        </span>
+                      </div>
+
+                      {integration?.lastExportError && (
+                        <div className="pb-2.5 border-b space-y-1">
+                          <span className="text-slate-400 font-medium block">Last Export Error</span>
+                          <span className="font-mono text-[10px] text-rose-600 break-all block bg-rose-50/50 p-1.5 rounded border border-rose-100">
+                            {integration.lastExportError}
+                          </span>
+                        </div>
+                      )}
+
+                      <div className="flex justify-between pb-2.5 border-b">
+                        <span className="text-slate-400 font-medium">Successful Test Exports</span>
+                        <span className="font-mono font-extrabold text-[#1E293B]">{integration?.successfulExports ?? 0}</span>
+                      </div>
+
+                      <div className="flex justify-between pb-2.5 border-b">
+                        <span className="text-slate-400 font-medium">Failed Test Exports</span>
+                        <span className="font-mono font-extrabold text-[#1E293B]">{integration?.failedExports ?? 0}</span>
+                      </div>
+
+                      <div className="flex justify-between pb-2.5 border-b">
+                        <span className="text-slate-400 font-medium">Local Buffer size</span>
+                        <span className="font-mono font-bold text-[#1E293B]">{integration?.localCount || 0} items</span>
+                      </div>
+
+                      <div className="pt-3 border-t">
+                        <h4 className="font-bold text-slate-800 text-[11px] uppercase tracking-wider mb-2">Real Trace Analytics</h4>
+                      </div>
+
+                      <div className="flex justify-between pb-2.5 border-b">
+                        <span className="text-slate-400 font-medium">Last Test Span Name</span>
+                        <span className="font-mono text-slate-600 font-bold max-w-[130px] truncate" title={integration?.lastTestExportedSpanName}>{integration?.lastTestExportedSpanName || 'N/A'}</span>
+                      </div>
+
+                      <div className="flex justify-between pb-2.5 border-b">
+                        <span className="text-slate-400 font-medium">Last Real Span Name</span>
+                        <span className="font-mono text-slate-600 font-bold max-w-[130px] truncate" title={integration?.lastRealExportedSpanName}>{integration?.lastRealExportedSpanName || 'N/A'}</span>
+                      </div>
+
+                      <div className="flex justify-between pb-2.5 border-b">
+                        <span className="text-slate-400 font-medium">Last Real Trace ID</span>
+                        <span className="font-mono text-violet-700 font-bold max-w-[130px] truncate" title={integration?.lastRealExportedTraceId}>{integration?.lastRealExportedTraceId || 'N/A'}</span>
+                      </div>
+
+                      <div className="flex justify-between pb-2.5 border-b">
+                        <span className="text-slate-400 font-medium">Real Export Attempts</span>
+                        <span className="font-mono font-extrabold text-[#1E293B]">{integration?.realExportAttempts ?? 0}</span>
+                      </div>
+
+                      <div className="flex justify-between pb-2.5 border-b">
+                        <span className="text-slate-400 font-medium text-emerald-700">Successful Real Exports</span>
+                        <span className="font-mono font-extrabold text-emerald-600">{integration?.successfulRealExports ?? 0}</span>
+                      </div>
+
+                      <div className="flex justify-between pb-2.5 border-b">
+                        <span className="text-slate-400 font-medium text-rose-700">Failed Real Exports</span>
+                        <span className="font-mono font-extrabold text-rose-600">{integration?.failedRealExports ?? 0}</span>
+                      </div>
+
+                      {integration?.lastRealExportError && (
+                        <div className="pb-2.5 border-b space-y-1">
+                          <span className="text-slate-400 font-medium block">Last Real Export Error</span>
+                          <span className="font-mono text-[10px] text-rose-600 break-all block bg-rose-50/50 p-1.5 rounded border border-rose-100">
+                            {integration.lastRealExportError}
+                          </span>
+                        </div>
+                      )}
                     </div>
                   </div>
 
@@ -1798,6 +1957,24 @@ export default function App() {
                       )}
                     </button>
 
+                    <button
+                      onClick={handleSendTestTrace}
+                      disabled={testingTrace}
+                      className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-indigo-50 border border-indigo-200 text-indigo-700 hover:bg-indigo-100 rounded-xl text-xs font-bold shadow-sm transition-all disabled:opacity-50 cursor-pointer"
+                    >
+                      {testingTrace ? (
+                        <>
+                          <RefreshCw size={14} className="animate-spin" />
+                          Broadcasting Trace...
+                        </>
+                      ) : (
+                        <>
+                          <Activity size={14} />
+                          Send Visible Phoenix Trace
+                        </>
+                      )}
+                    </button>
+
                     {testTraceResult && (
                       <div className={`p-4 rounded-xl border text-xs space-y-2 animate-fade-in ${
                         testTraceResult.success 
@@ -1817,14 +1994,76 @@ export default function App() {
                             </>
                           )}
                         </div>
-                        <div className="font-mono text-[10px] space-y-1 bg-white/70 p-2 rounded border border-black/5 leading-normal">
-                          <p><strong>Endpoint:</strong> {testTraceResult.endpoint}</p>
-                          <p><strong>HTTP Status:</strong> {testTraceResult.status}</p>
-                          {testTraceResult.message && <p><strong>Details:</strong> {testTraceResult.message}</p>}
-                          {testTraceResult.error && <p className="text-rose-600 pt-1"><strong>Error:</strong> {testTraceResult.error}</p>}
+                        <div className="font-mono text-[10px] space-y-1.5 bg-white/70 p-2.5 rounded border border-black/5 leading-normal">
+                          <p className="break-all"><strong>Endpoint Config:</strong> {testTraceResult.endpoint}</p>
+                          <p className="break-all text-violet-700 font-bold"><strong>Final Export URL:</strong> {testTraceResult.finalExportUrl || 'N/A'}</p>
+                          <p><strong>PHOENIX_API_KEY Present:</strong> {testTraceResult.apiKeyPresent ? 'Yes (Protected)' : 'No (Local-Only Fallback)'}</p>
+                          <p><strong>HTTP Status Code:</strong> {testTraceResult.status}</p>
+                          <p><strong>Last Export Status:</strong> <span className="font-bold">{testTraceResult.lastExportStatus || 'idle'}</span></p>
+                          {testTraceResult.message && <p className="text-emerald-700"><strong>Details:</strong> {testTraceResult.message}</p>}
+                          {testTraceResult.error && <p className="text-rose-600 pt-0.5"><strong>Error Message:</strong> {testTraceResult.error}</p>}
+                          {testTraceResult.responseBody && (
+                            <div className="text-slate-600 border-t pt-1 mt-1 font-mono text-[9px] max-h-24 overflow-y-auto leading-tight bg-white/50 p-1.5 rounded">
+                              <strong>Response Body:</strong> {testTraceResult.responseBody}
+                            </div>
+                          )}
                         </div>
                       </div>
                     )}
+                  </div>
+
+                  {/* ACTIVE POLICY EVALUATION METRICS */}
+                  <div className="bg-white border p-6 rounded-2xl shadow-sm space-y-4">
+                    <h3 className="font-bold text-gray-900 text-sm flex items-center gap-1.5 font-sans">
+                      <ShieldCheck size={16} className="text-emerald-600" />
+                      Active Policy Evaluation Metrics
+                    </h3>
+                    <p className="text-xs text-gray-500 leading-relaxed font-semibold">
+                      Real-time assessment scores computed over all conversational and replay traces in current cache memory.
+                    </p>
+
+                    <div className="space-y-3.5 text-xs">
+                      {/* Total */}
+                      <div className="flex justify-between items-center pb-2 border-b">
+                        <span className="text-slate-500 font-medium">Total Traces Simulated</span>
+                        <span className="font-mono font-extrabold text-slate-900 bg-slate-100 px-2 py-0.5 rounded">
+                          {traces.length} runs
+                        </span>
+                      </div>
+
+                      {/* Compliant */}
+                      <div className="flex justify-between items-center pb-2 border-b">
+                        <div className="flex items-center gap-1.5">
+                          <div className="w-2.5 h-2.5 rounded-full bg-emerald-500" />
+                          <span className="text-slate-600 font-medium">Compliant Traces</span>
+                        </div>
+                        <span className="font-mono font-bold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded">
+                          {traces.filter(t => t.verdict === 'compliant' || (!t.verdict && t.status === 'success')).length} ({traces.length > 0 ? ((traces.filter(t => t.verdict === 'compliant' || (!t.verdict && t.status === 'success')).length / traces.length) * 100).toFixed(1) : '0.0'}%)
+                        </span>
+                      </div>
+
+                      {/* Risky */}
+                      <div className="flex justify-between items-center pb-2 border-b">
+                        <div className="flex items-center gap-1.5">
+                          <div className="w-2.5 h-2.5 rounded-full bg-amber-500" />
+                          <span className="text-slate-600 font-medium">Risky Traces</span>
+                        </div>
+                        <span className="font-mono font-bold text-amber-700 bg-amber-50 px-2 py-0.5 rounded">
+                          {traces.filter(t => t.verdict === 'risky' || (!t.verdict && t.status === 'risky')).length} ({traces.length > 0 ? ((traces.filter(t => t.verdict === 'risky' || (!t.verdict && t.status === 'risky')).length / traces.length) * 100).toFixed(1) : '0.0'}%)
+                        </span>
+                      </div>
+
+                      {/* Non-Compliant */}
+                      <div className="flex justify-between items-center pb-2 border-b">
+                        <div className="flex items-center gap-1.5">
+                          <div className="w-2.5 h-2.5 rounded-full bg-rose-500" />
+                          <span className="text-slate-600 font-medium">Non-Compliant Traces</span>
+                        </div>
+                        <span className="font-mono font-bold text-rose-700 bg-rose-50 px-2 py-0.5 rounded">
+                          {traces.filter(t => t.verdict === 'non_compliant' || (!t.verdict && t.status === 'failed')).length} ({traces.length > 0 ? ((traces.filter(t => t.verdict === 'non_compliant' || (!t.verdict && t.status === 'failed')).length / traces.length) * 100).toFixed(1) : '0.0'}%)
+                        </span>
+                      </div>
+                    </div>
                   </div>
 
                   {/* Environment Config Info Card */}

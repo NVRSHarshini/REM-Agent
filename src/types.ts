@@ -148,4 +148,17 @@ export interface IntegrationStatus {
   lastExportError?: string;
   localCount: number;
   successfulExports: number;
+  finalExportUrl?: string;
+  exportProtocol?: string;
+  apiKeyPresent?: boolean;
+  failedExports?: number;
+  lastTestExportedSpanName?: string;
+  lastRealExportedSpanName?: string;
+  lastRealExportedTraceId?: string;
+  realExportAttempts?: number;
+  successfulRealExports?: number;
+  failedRealExports?: number;
+  lastRealExportError?: string;
+  projectHeaderSent?: string;
+  projectNameValueSent?: string;
 }
